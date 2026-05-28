@@ -2,17 +2,25 @@ import base64
 import io
 import os
 import smtplib
-import time
 import urllib.parse
 import sqlite3
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import arabic_reshaper
+# محاولة استيراد مكتبات العربية مع معالجة الأخطاء
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    ARABIC_SUPPORT = True
+except ImportError:
+    ARABIC_SUPPORT = False
+    # دوال بديلة إذا فشل التثبيت
+    def get_display(x): return str(x)
+    arabic_reshaper = None
+
 import numpy as np
 import pandas as pd
 import streamlit as st
-from bidi.algorithm import get_display
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
@@ -38,7 +46,19 @@ CODES_DB = {
     "2026": "breeder",
 }
 
-PHOTO_OPTIONS = ["14686.jpg", "1000069464.jpg", "14686.JPG", "1000069464.JPG"]
+# ==========================================
+# دوال معالجة العربية (آمنة)
+# ==========================================
+
+def fix_arabic_text(text):
+    """معالجة النصوص العربية - تعمل حتى بدون المكتبات"""
+    if not ARABIC_SUPPORT or arabic_reshaper is None:
+        return str(text)
+    try:
+        reshaped = arabic_reshaper.reshape(str(text))
+        return get_display(reshaped)
+    except Exception:
+        return str(text)
 
 # ==========================================
 # إدارة قاعدة البيانات
@@ -81,6 +101,7 @@ def init_database():
         seed_database(conn)
     
     conn.close()
+    return True
 
 def seed_database(conn):
     """ضخ البيانات الأولية"""
@@ -91,31 +112,41 @@ def seed_database(conn):
             "ذرة صفراء": {"CP": 8.5, "lys": 0.24, "met": 0.17, "DC": 0.85, "SE": 80.0, "price": 230.0},
             "ذرة بيضاء": {"CP": 8.8, "lys": 0.23, "met": 0.16, "DC": 0.83, "SE": 78.0, "price": 225.0},
             "شعير مطحون": {"CP": 11.5, "lys": 0.36, "met": 0.19, "DC": 0.80, "SE": 71.0, "price": 210.0},
+            "سورجم (فتريتة)": {"CP": 10.0, "lys": 0.22, "met": 0.15, "DC": 0.78, "SE": 70.0, "price": 195.0},
         },
         "🌱 الأكساب ومصادر البروتين": {
             "كسب فول صويا 44%": {"CP": 44.0, "lys": 2.70, "met": 0.62, "DC": 0.90, "SE": 74.0, "price": 440.0},
+            "كسب فول صويا 48%": {"CP": 48.0, "lys": 2.90, "met": 0.67, "DC": 0.91, "SE": 76.0, "price": 480.0},
             "كسب عباد الشمس 36%": {"CP": 36.0, "lys": 1.20, "met": 0.75, "DC": 0.76, "SE": 42.0, "price": 310.0},
+            "أمباز الفول السوداني (كسب)": {"CP": 46.0, "lys": 1.60, "met": 0.52, "DC": 0.88, "SE": 73.0, "price": 460.0},
+        },
+        "🧬 مصادر البروتين الحيواني": {
+            "مسحوق أسماك (Fishmeal 60%)": {"CP": 60.0, "lys": 4.50, "met": 1.65, "DC": 0.85, "SE": 65.0, "price": 850.0},
         },
         "🪨 الأملاح والمعادن": {
             "ملح الطعام": {"CP": 0.0, "lys": 0.0, "met": 0.0, "DC": 0.0, "SE": 0.0, "price": 30.0},
             "الحجر الجيري": {"CP": 0.0, "lys": 0.0, "met": 0.0, "DC": 0.0, "SE": 0.0, "price": 40.0},
+            "فوسفات ثنائي الكالسيوم (DCP)": {"CP": 0.0, "lys": 0.0, "met": 0.0, "DC": 0.0, "SE": 0.0, "price": 280.0},
+        },
+        "🔬 الإنزيمات والإضافات": {
+            "بريمكس تسمين دواجن": {"CP": 0.0, "lys": 0.0, "met": 0.0, "DC": 0.0, "SE": 0.0, "price": 230.0},
         }
     }
     
     for cat, items in library.items():
         for name, nut in items.items():
             cursor.execute("""
-                INSERT INTO Ingredients (name, category, price_per_ton, max_limit, min_limit)
+                INSERT OR IGNORE INTO Ingredients (name, category, price_per_ton, max_limit, min_limit)
                 VALUES (?, ?, ?, 100.0, 0.0)
             """, (name, cat, nut["price"]))
             
-            ing_id = cursor.lastrowid if cursor.lastrowid else cursor.execute(
-                "SELECT id FROM Ingredients WHERE name=?", (name,)
-            ).fetchone()[0]
-            
-            cursor.execute("""
-                INSERT INTO Nutrient_Matrix VALUES (?, ?, ?, ?, ?, ?)
-            """, (ing_id, nut["CP"], nut["lys"], nut["met"], nut["DC"], nut["SE"]))
+            cursor.execute("SELECT id FROM Ingredients WHERE name=?", (name,))
+            result = cursor.fetchone()
+            if result:
+                ing_id = result[0]
+                cursor.execute("""
+                    INSERT OR REPLACE INTO Nutrient_Matrix VALUES (?, ?, ?, ?, ?, ?)
+                """, (ing_id, nut["CP"], nut["lys"], nut["met"], nut["DC"], nut["SE"]))
     
     conn.commit()
 
@@ -137,22 +168,16 @@ def load_feeds_from_db():
         sub_df = df[df['category'] == cat]
         for _, row in sub_df.iterrows():
             structured_library[cat][row['name']] = {
-                "CP": row['crude_protein'], "lys": row['lysine'], "met": row['methionine'],
-                "DC": row['digestibility_coeff'], "SE": row['starch_equivalent'], 
-                "price": row['price_per_ton'], "max": row['max_limit'], "min": row['min_limit']
+                "CP": row['crude_protein'], 
+                "lys": row['lysine'], 
+                "met": row['methionine'],
+                "DC": row['digestibility_coeff'], 
+                "SE": row['starch_equivalent'], 
+                "price": row['price_per_ton'], 
+                "max": row['max_limit'], 
+                "min": row['min_limit']
             }
     return structured_library
-
-# ==========================================
-# دوال مساعدة
-# ==========================================
-
-def fix_arabic_text(text):
-    try:
-        reshaped = arabic_reshaper.reshape(str(text))
-        return get_display(reshaped)
-    except:
-        return str(text)
 
 def send_code_to_mail(receiver_email):
     """إرسال الكود عبر البريد"""
@@ -179,16 +204,6 @@ def send_code_to_mail(receiver_email):
         st.error(f"فشل الإرسال: {e}")
         return False
 
-def get_image_base64(paths):
-    for path in paths:
-        if os.path.exists(path):
-            try:
-                with open(path, "rb") as f:
-                    return base64.b64encode(f.read()).decode()
-            except:
-                pass
-    return None
-
 # ==========================================
 # واجهة Streamlit الرئيسية
 # ==========================================
@@ -200,8 +215,16 @@ def main():
         layout="wide",
     )
     
+    # تحذير إذا كانت مكتبات العربية غير مثبتة
+    if not ARABIC_SUPPORT:
+        st.warning("⚠️ ملاحظة: بعض مكتبات عرض اللغة العربية غير مثبتة. النصوص ستعرض بشكل مبسط ولكن جميع الوظائف تعمل بشكل طبيعي.")
+    
     # تهيئة قاعدة البيانات
-    init_database()
+    try:
+        init_database()
+    except Exception as e:
+        st.error(f"خطأ في قاعدة البيانات: {e}")
+        st.stop()
     
     # بوابة الدخول
     if "approved" not in st.session_state:
@@ -250,7 +273,7 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            country = st.selectbox("الدولة:", ["السودان", "مصر", "ليبيا", "أخرى"])
+            country = st.selectbox("الدولة:", ["السودان", "مصر", "ليبيا", "السعودية", "الإمارات", "أخرى"])
         with col2:
             city = st.text_input("المدينة:", "الخرطوم")
         
@@ -276,51 +299,72 @@ def main():
         
         if st.button("🚀 تشغيل المحرك", type="primary"):
             if len(selected_ingredients) < 2:
-                st.warning("اختر مكونين على الأقل")
+                st.warning("⚠️ يرجى اختيار مكونين على الأقل")
             else:
-                with st.spinner("جاري الحساب..."):
-                    # مصفوفة التكلفة
-                    c = [prices[ing] for ing in selected_ingredients]
-                    
-                    # قيود المساواة (المجموع 100%)
-                    A_eq = [[1.0] * len(selected_ingredients)]
-                    b_eq = [100.0]
-                    
-                    # قيد البروتين
-                    protein_row = []
-                    for ing in selected_ingredients:
-                        for cat in feeds_library.values():
-                            if ing in cat:
-                                protein_row.append(cat[ing]["CP"])
-                                break
-                    A_eq.append(protein_row)
-                    b_eq.append(target_protein)
-                    
-                    # حدود المكونات
-                    bounds = []
-                    for ing in selected_ingredients:
-                        for cat in feeds_library.values():
-                            if ing in cat:
-                                bounds.append((cat[ing]["min"], cat[ing]["max"]))
-                                break
-                    
-                    result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
-                    
-                    if result.success:
-                        st.success("✅ تم حساب التركيبة المثلى!")
+                with st.spinner("جاري حساب التركيبة المثلى..."):
+                    try:
+                        # مصفوفة التكلفة
+                        c = [prices[ing] for ing in selected_ingredients]
                         
-                        col_r1, col_r2 = st.columns(2)
-                        with col_r1:
-                            st.markdown("**المقادير لكل طن:**")
-                            for ing, pct in zip(selected_ingredients, result.x):
-                                if pct > 0.01:
-                                    st.markdown(f"- {ing}: **{pct:.1f}%** ({pct*10:.1f} كجم)")
+                        # قيود المساواة (المجموع 100%)
+                        A_eq = [[1.0] * len(selected_ingredients)]
+                        b_eq = [100.0]
                         
-                        with col_r2:
-                            st.metric("💰 تكلفة الطن", f"${result.fun:.2f}")
-                            st.metric("🧬 البروتين المحقق", f"{target_protein:.1f}%")
-                    else:
-                        st.error("❌ لم يتم إيجاد حل. حاول إضافة مكونات أخرى")
+                        # قيد البروتين
+                        protein_row = []
+                        for ing in selected_ingredients:
+                            found = False
+                            for cat in feeds_library.values():
+                                if ing in cat:
+                                    protein_row.append(cat[ing]["CP"])
+                                    found = True
+                                    break
+                            if not found:
+                                protein_row.append(0.0)
+                        
+                        A_eq.append(protein_row)
+                        b_eq.append(target_protein)
+                        
+                        # حدود المكونات
+                        bounds = []
+                        for ing in selected_ingredients:
+                            found = False
+                            for cat in feeds_library.values():
+                                if ing in cat:
+                                    bounds.append((cat[ing]["min"], cat[ing]["max"]))
+                                    found = True
+                                    break
+                            if not found:
+                                bounds.append((0.0, 100.0))
+                        
+                        result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
+                        
+                        if result.success:
+                            st.success("✅ تم حساب التركيبة المثلى!")
+                            
+                            col_r1, col_r2 = st.columns(2)
+                            with col_r1:
+                                st.markdown("**📝 المقادير لكل طن:**")
+                                for ing, pct in zip(selected_ingredients, result.x):
+                                    if pct > 0.01:
+                                        st.markdown(f"- {ing}: **{pct:.1f}%** ({pct*10:.1f} كجم)")
+                            
+                            with col_r2:
+                                st.metric("💰 تكلفة الطن", f"${result.fun:.2f}")
+                                st.metric("🧬 البروتين المحقق", f"{target_protein:.1f}%")
+                            
+                            # تخزين النتيجة للاستخدام في التبويبات الأخرى
+                            st.session_state["last_formula"] = {ing: pct for ing, pct in zip(selected_ingredients, result.x) if pct > 0.01}
+                            st.session_state["last_cost"] = result.fun
+                        else:
+                            st.error("❌ لم يتم إيجاد حل مناسب. حاول:")
+                            st.markdown("""
+                            - إضافة مكونات أكثر (خاصة مصادر البروتين)
+                            - خفض نسبة البروتين المستهدفة قليلاً
+                            - التأكد من صحة الأسعار المدخلة
+                            """)
+                    except Exception as e:
+                        st.error(f"حدث خطأ أثناء الحساب: {str(e)}")
     
     with tab2:
         st.subheader("📊 إدارة المخزون")
@@ -331,10 +375,25 @@ def main():
                 for name in cat:
                     st.session_state["inventory"][name] = 10.0
         
-        for name, qty in list(st.session_state["inventory"].items())[:15]:
+        # إضافة خصم تلقائي من آخر خلطة
+        if "last_formula" in st.session_state and st.button("🔄 خصم مكونات آخر خلطة من المخزون"):
+            tons = st.number_input("الكمية المنتجة (طن):", min_value=0.1, value=1.0, step=0.5)
+            if st.button("تأكيد الخصم"):
+                for name, pct in st.session_state["last_formula"].items():
+                    if name in st.session_state["inventory"]:
+                        consumed = (pct / 100) * tons
+                        st.session_state["inventory"][name] -= consumed
+                st.success(f"✅ تم خصم مكونات {tons} طن من المخزون")
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # عرض المخزون
+        for name, qty in list(st.session_state["inventory"].items())[:20]:
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.write(f"**{name}**")
+                status = "🔴" if qty < 5 else "🟢" if qty > 20 else "🟡"
+                st.write(f"{status} **{name}**")
             with col2:
                 if st.session_state["user_role"] == "owner":
                     st.session_state["inventory"][name] = st.number_input(
@@ -346,27 +405,48 @@ def main():
     with tab3:
         st.subheader("📖 دليل المستخدم")
         st.markdown("""
-        **منصة تاور العلمية للانتاج الحيواني وتركيب الاعلاف**
+        ## 📚 منصة تاور العلمية للانتاج الحيواني وتركيب الاعلاف
         
-        **المشرف:** الاختصاصي م. عبد القادر إسماعيل تاور
+        **المشرف العام:** الاختصاصي م. عبد القادر إسماعيل تاور
         
-        **الأكواد:**
-        - مالك: `202687`
-        - مختص: `2020`
-        - مربي: `2026`
+        ### 🔑 أكواد الدخول:
+        | الكود | الصلاحية |
+        |-------|----------|
+        | `202687` | مالك المنصة (صلاحية كاملة) |
+        | `2020` | مختص / طبيب بيطري |
+        | `2026` | مربي (صلاحية محدودة) |
         
-        **للاستفسارات:** تواصل عبر واتساب
+        ### 🎯 كيفية الاستخدام:
+        1. اختر الدولة والمدينة لتحديد أسعار السوق
+        2. اختر المكونات العلفية المتوفرة لديك
+        3. حدد نسبة البروتين المستهدفة
+        4. اضغط "تشغيل المحرك" للحصول على التركيبة المثلى
+        
+        ### 💡 نصائح مهمة:
+        - كلما زاد عدد المكونات المختارة، كانت النتيجة أفضل
+        - يفضل إضافة مصادر بروتين مثل (كسب فول الصويا، أمباز الفول)
+        - يمكن تعديل الأسعار يدوياً حسب السوق المحلي
+        
+        ### 📞 للاستفسارات:
         """)
         
-        if WHATSAPP_NUMBER:
-            st.link_button("📱 واتساب", f"https://wa.me/{WHATSAPP_NUMBER}")
+        if WHATSAPP_NUMBER and WHATSAPP_NUMBER != "":
+            st.link_button("📱 تواصل عبر واتساب", f"https://wa.me/{WHATSAPP_NUMBER}")
+        
+        if GOOGLE_FORM_URL and GOOGLE_FORM_URL != "https://forms.gle/example":
+            st.link_button("📝 تقديم اقتراح أو استشارة", GOOGLE_FORM_URL)
     
     # إرسال الكود للمالك
-    if st.session_state["user_role"] == "owner":
+    if st.session_state["user_role"] == "owner" and SENDER_EMAIL:
         st.divider()
-        if st.button("📧 إرسال نسخة الكود إلى البريد"):
-            if send_code_to_mail(OWNER_EMAIL):
-                st.success("✅ تم الإرسال")
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("📧 إرسال نسخة الكود إلى البريد", type="secondary"):
+                with st.spinner("جاري الإرسال..."):
+                    if send_code_to_mail(OWNER_EMAIL):
+                        st.success("✅ تم إرسال الكود بنجاح إلى بريدك")
+                    else:
+                        st.error("❌ فشل الإرسال، تأكد من إعدادات البريد")
 
 if __name__ == "__main__":
     main()
