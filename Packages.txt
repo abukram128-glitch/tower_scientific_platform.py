@@ -1,0 +1,4 @@
+libfreetype6
+libpng16-16
+libjpeg62-turbo
+fontconfig
