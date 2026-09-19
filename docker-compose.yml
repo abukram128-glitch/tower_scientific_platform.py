@@ -1,1 +1,91 @@
+# ============================================================================
+# 🐳 Tawornology v19.5 — نشر بأمر واحد
+#   docker compose up -d --build
+# ============================================================================
+version: "3.9"
 
+services:
+
+  # ═══════════════════════════════════════════════════
+  # 🌾 التطبيق الموحّد (Streamlit + API)
+  # ═══════════════════════════════════════════════════
+  tawornology:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tawor_app
+    restart: unless-stopped
+    ports:
+      - "8501:8501"   # Streamlit
+      - "8502:8502"   # FastAPI
+    environment:
+      # ─── Security ───
+      TAWOR_JWT_SECRET: ${TAWOR_JWT_SECRET:-change-me-in-production}
+      TAWOR_JWT_EXPIRE_MIN: 1440
+      TAWOR_ADMIN_PASS: ${TAWOR_ADMIN_PASS:-admin123}
+
+      # ─── Database ───
+      TAWOR_DB_PATH: /app/tawor_user_data/tawor_api.db
+
+      # ─── Email (Gmail) ───
+      TAWOR_EMAIL_USER: ${TAWOR_EMAIL_USER:-}
+      TAWOR_EMAIL_PASS: ${TAWOR_EMAIL_PASS:-}
+
+      # ─── WhatsApp — Twilio ───
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_WHATSAPP_FROM: ${TWILIO_WHATSAPP_FROM:-whatsapp:+14155238886}
+
+      # ─── WhatsApp — Meta Cloud ───
+      META_PHONE_ID: ${META_PHONE_ID:-}
+      META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:-}
+
+      # ─── App Settings ───
+      TZ: Africa/Khartoum
+    volumes:
+      - tawor_data:/app/tawor_user_data
+      - tawor_logs:/app/logs
+      - ./photos:/app/photos:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ═══════════════════════════════════════════════════
+  # 🔄 Nginx Reverse Proxy (اختياري لكن مُستحسن)
+  # ═══════════════════════════════════════════════════
+  nginx:
+    image: nginx:alpine
+    container_name: tawor_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - tawornology
+    profiles: ["with-nginx"]
+
+  # ═══════════════════════════════════════════════════
+  # 📊 مراقبة (اختياري)
+  # ═══════════════════════════════════════════════════
+  watchtower:
+    image: containrrr/watchtower
+    container_name: tawor_watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 3600 --cleanup
+    profiles: ["monitoring"]
+
+volumes:
+  tawor_data:
+    driver: local
+  tawor_logs:
+    driver: local
+
+networks:
+  default:
+    name: tawor_network
